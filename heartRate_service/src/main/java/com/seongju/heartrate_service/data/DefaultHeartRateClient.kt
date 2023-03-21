@@ -4,10 +4,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
-import android.os.Message
-import android.os.ParcelUuid
+import android.os.*
 import android.util.Log
 import com.seongju.heartrate_service.common.BluetoothStatus
 import com.seongju.heartrate_service.common.Constants.CLIENT_CHARACTERISTIC_CONFIG
@@ -152,11 +149,17 @@ class DefaultHeartRateClient(
             }
 
             connectCallback = object : BluetoothGattCallback() {
+                // Build.VERSION_CODES.TIRAMISU 미만일 경우
                 override fun onCharacteristicChanged(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic?) {
                     super.onCharacteristicChanged(gatt, characteristic)
                     if (characteristic != null) {
                         onHeartRateChanged?.invoke(characteristic)
                     }
+                }
+                // Build.VERSION_CODES.TIRAMISU 이상일 경우
+                override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+                    super.onCharacteristicChanged(gatt, characteristic, value)
+                    onHeartRateChanged?.invoke(characteristic)
                 }
 
                 override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
@@ -319,10 +322,14 @@ class DefaultHeartRateClient(
 
             bluetoothGatt.setCharacteristicNotification(readCharacteristic, true)
             val descriptor: BluetoothGattDescriptor = readCharacteristic!!.getDescriptor(serviceDescriptor)
-            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
 
             try {
-                bluetoothGatt.writeDescriptor(descriptor)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    bluetoothGatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                } else {
+                    descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    bluetoothGatt.writeDescriptor(descriptor)
+                }
             } catch ( e: Exception) {
                 launch { send(HeartRateResult.Error(message = "HeartRate 측정 시작에 실패하였습니다.")) }
             }
@@ -343,10 +350,14 @@ class DefaultHeartRateClient(
 
             bluetoothGatt.setCharacteristicNotification(readCharacteristic, false)
             val descriptor: BluetoothGattDescriptor = readCharacteristic!!.getDescriptor(serviceDescriptor)
-            descriptor.value = BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
 
             try {
-                bluetoothGatt.writeDescriptor(descriptor)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    bluetoothGatt.writeDescriptor(descriptor, BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE)
+                } else {
+                    descriptor.value = BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+                    bluetoothGatt.writeDescriptor(descriptor)
+                }
                 emit(HeartRateResult.Success)
             } catch ( e: Exception) {
                 emit(HeartRateResult.Error(message = "HeartRate 측정 중지에 실패하였습니다."))
