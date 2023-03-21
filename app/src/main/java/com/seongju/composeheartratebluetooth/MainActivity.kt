@@ -7,27 +7,20 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Surface
-import androidx.compose.material.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.lifecycleScope
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.MultiplePermissionsState
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
-import com.seongju.composeheartratebluetooth.common.Constants.ACTION_SCAN_START
-import com.seongju.composeheartratebluetooth.common.Constants.ACTION_SCAN_STOP
-import com.seongju.composeheartratebluetooth.common.service.ServiceHelper
 import com.seongju.composeheartratebluetooth.common.service.ServiceManager
+import com.seongju.composeheartratebluetooth.presentation.heartrate.HeartRateScreen
 import com.seongju.composeheartratebluetooth.ui.theme.ComposeHeartRateBluetoothTheme
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 @AndroidEntryPoint
@@ -69,40 +62,23 @@ class MainActivity : ComponentActivity() {
                     }
                 )
 
-                ServiceHelper.triggerHeartRateService(
-                    context = application,
-                    action = ACTION_SCAN_START
-                )
-
-                lifecycleScope.launch {
-                    delay(10000)
-                    ServiceHelper.triggerHeartRateService(
-                        context = application,
-                        action = ACTION_SCAN_STOP
-                    )
-                }
-
                 // A surface container using the 'background' color from the theme
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colors.background
                 ) {
-                    Greeting("Android")
+                    if (serviceManager.heartRateServiceBound.value) {
+                        HeartRateScreen()
+                    } else {
+                        CircularProgressIndicator()
+                    }
                 }
             }
         }
     }
-}
 
-@Composable
-fun Greeting(name: String) {
-    Text(text = "Hello $name!")
-}
-
-@Preview(showBackground = true)
-@Composable
-fun DefaultPreview() {
-    ComposeHeartRateBluetoothTheme {
-        Greeting("Android")
+    override fun onDestroy() {
+        super.onDestroy()
+        serviceManager.stopHeartRateService()
     }
 }

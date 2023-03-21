@@ -6,12 +6,14 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
 import android.util.Log
+import androidx.compose.runtime.mutableStateOf
 
 class ServiceManager(
     private val context: Context
 ) {
 
     private val tag: String = "ServiceManager"
+    val heartRateServiceBound = mutableStateOf(false)
 
     lateinit var heartRateService: HeartRateService
 
@@ -43,6 +45,7 @@ class ServiceManager(
             override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
                 val getHeartRateService = service as HeartRateService.LocalBinder
                 heartRateService = getHeartRateService.getHeartRateService()
+                heartRateServiceBound.value = true
                 Log.d(tag, "HeartRateService 가 정상적으로 실행에 성공하였습니다.")
             }
 
