@@ -9,6 +9,7 @@ import android.os.Looper
 import android.os.Message
 import android.os.ParcelUuid
 import android.util.Log
+import com.seongju.heartrate_service.common.BluetoothStatus
 import com.seongju.heartrate_service.common.Constants.CLIENT_CHARACTERISTIC_CONFIG
 import com.seongju.heartrate_service.common.Constants.HEART_RATE_CONNECTING
 import com.seongju.heartrate_service.common.Constants.HEART_RATE_CONTROL_POINT
@@ -77,7 +78,6 @@ class DefaultHeartRateClient(
             scanCallback = object : ScanCallback() {
                 override fun onScanResult(callbackType: Int, result: ScanResult?) {
                     super.onScanResult(callbackType, result)
-
                     if (result != null) {
                         launch { send(HeartRateResult.HeartRateDevice(scanResult = result)) }
                     }
@@ -100,6 +100,7 @@ class DefaultHeartRateClient(
                 }
             }
 
+            // 스캔중이 아닐 때 스캔을 실행이 될 수도 있으니 한번 더 체크
             if (!scanState) {
                 scanState = true
                 bluetoothLeScanner.startScan(scanFilter, scanSettings, scanCallback)
@@ -108,6 +109,7 @@ class DefaultHeartRateClient(
                 launch { send(HeartRateResult.Error(message = "이미 동일한 설정으로 시작했으므로 스캔을 시작하지 못합니다.")) }
             }
 
+            // 종료될 시 Callback 을 초기화 하기 위해 필요함
             awaitClose {
                 bluetoothLeScanner.stopScan(scanCallback)
                 scanState = false
@@ -135,20 +137,221 @@ class DefaultHeartRateClient(
         }.flowOn(Dispatchers.IO)
     }
 
+    @SuppressLint("MissingPermission")
     override fun connectDevice(bluetoothDevice: BluetoothDevice, reconnectTime: Long): Flow<HeartRateResult> {
-        TODO("Not yet implemented")
+        return callbackFlow {
+            val bluetoothPermissionCheck = hasBluetoothPermission(context = context)
+            if (!bluetoothPermissionCheck) {
+                launch { send(HeartRateResult.Error(message = "블루투스 권한이 없습니다.")) }
+                return@callbackFlow
+            }
+
+            val connectDelayRunnable = Runnable {
+                launch { send(HeartRateResult.Error(message = "연결시간($reconnectTime)이 초과되었습니다.")) }
+                handler.sendEmptyMessage(HEART_RATE_CONNECTING)
+            }
+
+            connectCallback = object : BluetoothGattCallback() {
+                override fun onCharacteristicChanged(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic?) {
+                    super.onCharacteristicChanged(gatt, characteristic)
+                    if (characteristic != null) {
+                        onHeartRateChanged?.invoke(characteristic)
+                    }
+                }
+
+                override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
+                    super.onConnectionStateChange(gatt, status, newState)
+
+                    when(newState) {
+                        BluetoothProfile.STATE_CONNECTING -> {
+                            launch { send(HeartRateResult.HeartRateState(bluetoothStatus = BluetoothStatus.STATE_CONNECTING)) }
+                        }
+                        BluetoothProfile.STATE_CONNECTED -> {
+                            when(status) {
+                                BluetoothGatt.GATT_SUCCESS -> {
+                                    try {
+                                        discoverService()
+                                        return
+                                    } catch (error: Exception) {
+                                        Log.e(tag, "디바이스의 서비스를 찾는 중에 오류가 발생하였습니다.")
+                                        launch { send(HeartRateResult.HeartRateState(bluetoothStatus = BluetoothStatus.STATE_CONNECT_FAIL)) }
+                                        handler.sendEmptyMessage(HEART_RATE_CONNECTING)
+                                    }
+                                }
+                                else -> {
+                                    Log.e(tag, "GATT 서버 연결에 실패하였습니다.")
+                                    launch { send(HeartRateResult.HeartRateState(bluetoothStatus = BluetoothStatus.STATE_CONNECT_FAIL)) }
+                                    handler.sendEmptyMessage(HEART_RATE_CONNECTING)
+                                }
+                            }
+                        }
+                        BluetoothProfile.STATE_DISCONNECTED -> {
+                            when(status) {
+                                BluetoothGatt.GATT_CONNECTION_CONGESTED -> {
+                                    Log.e(tag, "연결이 불안정하여 연결이 해제되었습니다. ${reconnectTime / 1000}초간 재연결을 시도합니다.")
+                                    launch { send(HeartRateResult.HeartRateState(bluetoothStatus = BluetoothStatus.STATE_RECONNECTING)) }
+                                    handler.postDelayed({
+                                        Log.e(tag, "연결이 불안정하여 연결이 해제되었습니다.")
+                                        launch { send(HeartRateResult.HeartRateState(bluetoothStatus = BluetoothStatus.STATE_CONNECT_FAIL)) }
+                                        handler.sendEmptyMessage(HEART_RATE_RECONNECTING) }, reconnectTime)
+                                }
+                                BluetoothGatt.GATT_FAILURE -> {
+                                    Log.e(tag, "연결에 실패하였습니다. ${reconnectTime / 1000}초간 재연결을 시도합니다.")
+                                    launch { send(HeartRateResult.HeartRateState(bluetoothStatus = BluetoothStatus.STATE_RECONNECTING)) }
+                                    handler.postDelayed({
+                                        Log.e(tag, "연결에 실패하였습니다.")
+                                        launch { send(HeartRateResult.HeartRateState(bluetoothStatus = BluetoothStatus.STATE_CONNECT_FAIL)) }
+                                        handler.sendEmptyMessage(HEART_RATE_RECONNECTING) }, reconnectTime)
+                                }
+                                else -> {
+                                    //통신불량으로 해제된 것인지, 사용자가 해제한 것인지 구분하기 위함
+                                    if (disconnectCall) {
+                                        disconnectCall = false
+                                        launch { send(HeartRateResult.HeartRateState(bluetoothStatus = BluetoothStatus.STATE_DISCONNECTED)) }
+                                        bluetoothGatt.close()
+                                    } else {
+                                        Log.e(tag, "알 수 없는 이유로 연결이 해제되었습니다. ${reconnectTime / 1000}초간 재연결을 시도합니다.")
+                                        launch { send(HeartRateResult.HeartRateState(bluetoothStatus = BluetoothStatus.STATE_RECONNECTING)) }
+                                        handler.postDelayed({
+                                            Log.e(tag, "알 수 없는 이유로 연결이 해제되었습니다.")
+                                            launch { send(HeartRateResult.HeartRateState(bluetoothStatus = BluetoothStatus.STATE_CONNECT_FAIL)) }
+                                            handler.sendEmptyMessage(HEART_RATE_RECONNECTING) }, reconnectTime)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
+                    super.onServicesDiscovered(gatt, status)
+
+                    when(status) {
+                        // service 발견 후 characteristic 을 발견하지 못하였을 경우 연결 실패로 간주함
+                        BluetoothGatt.GATT_SUCCESS -> {
+                            val characteristicSettingState: Boolean = characteristicSetting()
+                            if (characteristicSettingState) {
+                                launch { send(HeartRateResult.HeartRateState(bluetoothStatus = BluetoothStatus.STATE_CONNECTED)) }
+                                handler.removeCallbacks(connectDelayRunnable)
+                            } else {
+                                Log.e(tag, "서비스를 찾다가 오류가 발생하였습니다.")
+                                launch { send(HeartRateResult.HeartRateState(bluetoothStatus = BluetoothStatus.STATE_CONNECT_FAIL)) }
+                                handler.sendEmptyMessage(HEART_RATE_CONNECTING)
+                            }
+                        }
+                        else -> {
+                            Log.e(tag, "서비스를 찾을 수 없어 연결을 취소합니다.")
+                            launch { send(HeartRateResult.HeartRateState(bluetoothStatus = BluetoothStatus.STATE_CONNECT_FAIL)) }
+                            handler.sendEmptyMessage(HEART_RATE_CONNECTING)
+                        }
+                    }
+                }
+            }
+
+            launch { send(HeartRateResult.HeartRateState(bluetoothStatus = BluetoothStatus.STATE_CONNECTING)) }
+            bluetoothDevice.createBond()
+            bluetoothGatt = bluetoothDevice.connectGatt(context, true, connectCallback, BluetoothDevice.TRANSPORT_LE)
+
+            // 10초동안 연결 안 될 경우 연결 실패로 간주
+            handler.postDelayed(connectDelayRunnable, reconnectTime)
+
+            awaitClose {
+                bluetoothGatt.disconnect()
+                bluetoothGatt.close()
+            }
+        }
     }
 
+    @SuppressLint("MissingPermission")
     override fun disconnectDevice(): Flow<HeartRateResult> {
-        TODO("Not yet implemented")
+        return flow {
+            val bluetoothPermissionCheck = hasBluetoothPermission(context = context)
+            if (!bluetoothPermissionCheck) {
+                emit(HeartRateResult.Error(message = "블루투스 권한이 없습니다."))
+                return@flow
+            }
+
+            if (::bluetoothGatt.isInitialized) {
+                disconnectCall = true
+                bluetoothGatt.disconnect()
+                emit(HeartRateResult.Success)
+            } else {
+                emit(HeartRateResult.Error(message = "블루투스 연결해제에 실패하였습니다."))
+            }
+        }.flowOn(Dispatchers.IO)
     }
 
+    @SuppressLint("MissingPermission")
     override fun startParser(): Flow<HeartRateResult> {
-        TODO("Not yet implemented")
+        return callbackFlow {
+            val bluetoothPermissionCheck = hasBluetoothPermission(context = context)
+            if (!bluetoothPermissionCheck) {
+                launch { send(HeartRateResult.Error(message = "블루투스 권한이 없습니다.")) }
+                return@callbackFlow
+            }
+
+            setOnHeartRateChangedListener { characteristic ->
+                when(characteristic.uuid) {
+                    serviceRxUUID -> {
+                        val flag = characteristic.properties
+                        val format = when(flag and 0x01) {
+                            0x01 -> {
+                                BluetoothGattCharacteristic.FORMAT_SINT16
+                            }
+                            else -> {
+                                BluetoothGattCharacteristic.FORMAT_UINT8
+                            }
+                        }
+                        val heartRate = characteristic.getIntValue(format, 1)
+                        launch { send(HeartRateResult.HeartRate(heartRate = heartRate)) }
+                    }
+                    else -> {
+                        val data = characteristic.value
+                        if (data?.isNotEmpty() == true) {
+                            val hexString = data.joinToString(separator = "") {
+                                String.format("%02X", it)
+                            }
+                            Log.d(tag, hexString)
+                        }
+                    }
+                }
+            }
+
+            bluetoothGatt.setCharacteristicNotification(readCharacteristic, true)
+            val descriptor: BluetoothGattDescriptor = readCharacteristic!!.getDescriptor(serviceDescriptor)
+            descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+
+            try {
+                bluetoothGatt.writeDescriptor(descriptor)
+            } catch ( e: Exception) {
+                launch { send(HeartRateResult.Error(message = "HeartRate 측정 시작에 실패하였습니다.")) }
+            }
+            awaitClose {
+
+            }
+        }
     }
 
+    @SuppressLint("MissingPermission")
     override fun stopParser(): Flow<HeartRateResult> {
-        TODO("Not yet implemented")
+        return flow<HeartRateResult> {
+            val bluetoothPermissionCheck = hasBluetoothPermission(context = context)
+            if (!bluetoothPermissionCheck) {
+                emit(HeartRateResult.Error(message = "블루투스 권한이 없습니다."))
+                return@flow
+            }
+
+            bluetoothGatt.setCharacteristicNotification(readCharacteristic, false)
+            val descriptor: BluetoothGattDescriptor = readCharacteristic!!.getDescriptor(serviceDescriptor)
+            descriptor.value = BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+
+            try {
+                bluetoothGatt.writeDescriptor(descriptor)
+                emit(HeartRateResult.Success)
+            } catch ( e: Exception) {
+                emit(HeartRateResult.Error(message = "HeartRate 측정 중지에 실패하였습니다."))
+            }
+        }.flowOn(Dispatchers.IO)
     }
 
     @SuppressLint("MissingPermission")
