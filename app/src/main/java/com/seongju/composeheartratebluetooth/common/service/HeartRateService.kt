@@ -1,13 +1,22 @@
 package com.seongju.composeheartratebluetooth.common.service
 
 import android.app.Service
-import android.bluetooth.le.ScanResult
+import android.bluetooth.BluetoothDevice
 import android.content.Intent
 import android.os.Binder
+import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import com.seongju.composeheartratebluetooth.common.Constants.ACTION_CONNECT
+import com.seongju.composeheartratebluetooth.common.Constants.ACTION_DISCONNECT
+import com.seongju.composeheartratebluetooth.common.Constants.ACTION_PARSER_START
+import com.seongju.composeheartratebluetooth.common.Constants.ACTION_PARSER_STOP
 import com.seongju.composeheartratebluetooth.common.Constants.ACTION_SCAN_START
 import com.seongju.composeheartratebluetooth.common.Constants.ACTION_SCAN_STOP
+import com.seongju.composeheartratebluetooth.common.Constants.BLUETOOTH_DEVICE
+import com.seongju.heartrate_service.common.BluetoothStatus
 import com.seongju.heartrate_service.domain.HeartRateClient
 import com.seongju.heartrate_service.util.HeartRateResult
 import dagger.hilt.android.AndroidEntryPoint
@@ -30,6 +39,12 @@ class HeartRateService: Service() {
     @Inject
     lateinit var heartRateClient: HeartRateClient
 
+    var heartRateScanList = mutableStateMapOf<BluetoothDevice, BluetoothStatus>()
+        private set
+    var heartRateConnectDevice = mutableStateMapOf<BluetoothDevice, BluetoothStatus>()
+        private set
+    var heartRate = mutableStateOf(0)
+
     private fun startScanHeartRateDevice() {
         heartRateClient.startDeviceScan()
             .catch { e -> e.printStackTrace() }
@@ -39,7 +54,7 @@ class HeartRateService: Service() {
                         Log.e(tag, it.message)
                     }
                     is HeartRateResult.HeartRateDevice -> {
-                        Log.d(tag, it.scanResult.device.alias.toString())
+                        heartRateScanList[it.scanResult.device] = BluetoothStatus.STATE_DISCONNECTED
                     }
                     else -> Unit
                 }
@@ -62,6 +77,74 @@ class HeartRateService: Service() {
             }.launchIn(serviceHeartRateScope)
     }
 
+    private fun connectHeartRateDevice(bluetoothDevice: BluetoothDevice) {
+        heartRateClient.connectDevice(bluetoothDevice = bluetoothDevice, reconnectTime = 5000)
+            .catch { e -> e.printStackTrace() }
+            .onEach {
+                when(it) {
+                    is HeartRateResult.Error -> {
+                        Log.e(tag, it.message)
+                    }
+                    is HeartRateResult.HeartRateState -> {
+                        if (it.bluetoothStatus == BluetoothStatus.STATE_DISCONNECTED || it.bluetoothStatus == BluetoothStatus.STATE_CONNECT_FAIL) {
+                            heartRateConnectDevice.remove(bluetoothDevice)
+                        } else {
+                            heartRateConnectDevice[bluetoothDevice] = it.bluetoothStatus
+                        }
+                    }
+                    else -> Unit
+                }
+            }.launchIn(serviceHeartRateScope)
+    }
+
+    private fun disconnectHeartRateDevice() {
+        heartRateClient.disconnectDevice()
+            .catch { e -> e.printStackTrace() }
+            .onEach {
+                when(it) {
+                    is HeartRateResult.Error -> {
+                        Log.e(tag, it.message)
+                    }
+                    HeartRateResult.Success -> {
+                        Log.d(tag, "HeartRate device disconnect success")
+                    }
+                    else -> Unit
+                }
+            }.launchIn(serviceHeartRateScope)
+    }
+
+    private fun startParserHeartRateDevice() {
+        heartRateClient.startParser()
+            .catch { e -> e.printStackTrace() }
+            .onEach {
+                when(it) {
+                    is HeartRateResult.Error -> {
+                        Log.e(tag, it.message)
+                    }
+                    is HeartRateResult.HeartRate -> {
+                        heartRate.value = it.heartRate
+                    }
+                    else -> Unit
+                }
+            }.launchIn(serviceHeartRateScope)
+    }
+
+    private fun stopParserHeartRateDevice() {
+        heartRateClient.stopParser()
+            .catch { e -> e.printStackTrace() }
+            .onEach {
+                when(it) {
+                    is HeartRateResult.Error -> {
+                        Log.e(tag, it.message)
+                    }
+                    HeartRateResult.Success -> {
+                        Log.d(tag, "HeartRate device parser stop success")
+                    }
+                    else -> Unit
+                }
+            }.launchIn(serviceHeartRateScope)
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when(intent?.action) {
             ACTION_SCAN_START -> {
@@ -69,6 +152,30 @@ class HeartRateService: Service() {
             }
             ACTION_SCAN_STOP -> {
                 stopScanHeartRateDevice()
+            }
+            ACTION_CONNECT -> {
+                val bluetoothDevice = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(BLUETOOTH_DEVICE, BluetoothDevice::class.java)
+                } else {
+                    intent.getParcelableExtra(BLUETOOTH_DEVICE)
+                }
+                if (bluetoothDevice != null)
+                    connectHeartRateDevice(bluetoothDevice = bluetoothDevice)
+            }
+            ACTION_DISCONNECT -> {
+                val bluetoothDevice = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(BLUETOOTH_DEVICE, BluetoothDevice::class.java)
+                } else {
+                    intent.getParcelableExtra(BLUETOOTH_DEVICE)
+                }
+                if (bluetoothDevice != null)
+                    disconnectHeartRateDevice()
+            }
+            ACTION_PARSER_START -> {
+                startParserHeartRateDevice()
+            }
+            ACTION_PARSER_STOP -> {
+                stopParserHeartRateDevice()
             }
         }
         return super.onStartCommand(intent, flags, startId)
